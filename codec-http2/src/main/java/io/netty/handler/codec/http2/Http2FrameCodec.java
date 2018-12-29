@@ -143,12 +143,12 @@ public class Http2FrameCodec extends Http2ConnectionHandler {
 
     private static final InternalLogger LOG = InternalLoggerFactory.getInstance(Http2FrameCodec.class);
 
-    private final PropertyKey streamKey;
+    protected final PropertyKey streamKey;
     private final PropertyKey upgradeKey;
 
     private final Integer initialFlowControlWindowSize;
 
-    private ChannelHandlerContext ctx;
+    ChannelHandlerContext ctx;
 
     /** Number of buffered streams if the {@link StreamBufferingEncoder} is used. **/
     private int numBufferedStreams;
@@ -186,7 +186,7 @@ public class Http2FrameCodec extends Http2ConnectionHandler {
                 try {
                     return streamVisitor.visit((Http2FrameStream) stream.getProperty(streamKey));
                 } catch (Throwable cause) {
-                    onError(ctx, cause);
+                    onError(ctx, false, cause);
                     return false;
                 }
             }
@@ -296,6 +296,10 @@ public class Http2FrameCodec extends Http2ConnectionHandler {
             encoder().writeSettings(ctx, ((Http2SettingsFrame) msg).settings(), promise);
         } else if (msg instanceof Http2GoAwayFrame) {
             writeGoAwayFrame(ctx, (Http2GoAwayFrame) msg, promise);
+        } else if (msg instanceof Http2UnknownFrame) {
+            Http2UnknownFrame unknownFrame = (Http2UnknownFrame) msg;
+            encoder().writeFrame(ctx, unknownFrame.frameType(), unknownFrame.stream().id(),
+                    unknownFrame.flags(), unknownFrame.content(), promise);
         } else if (!(msg instanceof Http2Frame)) {
             ctx.write(msg, promise);
         } else {
@@ -305,16 +309,15 @@ public class Http2FrameCodec extends Http2ConnectionHandler {
     }
 
     private void increaseInitialConnectionWindow(int deltaBytes) throws Http2Exception {
-        Http2LocalFlowController localFlow = connection().local().flowController();
-        int targetConnectionWindow = localFlow.initialWindowSize() + deltaBytes;
-        localFlow.incrementWindowSize(connection().connectionStream(), deltaBytes);
-        localFlow.initialWindowSize(targetConnectionWindow);
+        // The LocalFlowController is responsible for detecting over/under flow.
+        connection().local().flowController().incrementWindowSize(connection().connectionStream(), deltaBytes);
     }
 
     final boolean consumeBytes(int streamId, int bytes) throws Http2Exception {
         Http2Stream stream = connection().stream(streamId);
-        // upgraded requests are ineligible for stream control
-        if (streamId == Http2CodecUtil.HTTP_UPGRADE_STREAM_ID) {
+        // Upgraded requests are ineligible for stream control. We add the null check
+        // in case the stream has been deregistered.
+        if (stream != null && streamId == Http2CodecUtil.HTTP_UPGRADE_STREAM_ID) {
             Boolean upgraded = stream.getProperty(upgradeKey);
             if (Boolean.TRUE.equals(upgraded)) {
                 return false;
@@ -433,11 +436,16 @@ public class Http2FrameCodec extends Http2ConnectionHandler {
     }
 
     @Override
-    protected void onConnectionError(ChannelHandlerContext ctx, Throwable cause, Http2Exception http2Ex) {
-        // allow the user to handle it first in the pipeline, and then automatically clean up.
-        // If this is not desired behavior the user can override this method.
-        ctx.fireExceptionCaught(cause);
-        super.onConnectionError(ctx, cause, http2Ex);
+    protected void onConnectionError(
+            ChannelHandlerContext ctx, boolean outbound, Throwable cause, Http2Exception http2Ex) {
+        if (!outbound) {
+            // allow the user to handle it first in the pipeline, and then automatically clean up.
+            // If this is not desired behavior the user can override this method.
+            //
+            // We only forward non outbound errors as outbound errors will already be reflected by failing the promise.
+            ctx.fireExceptionCaught(cause);
+        }
+        super.onConnectionError(ctx, outbound, cause, http2Ex);
     }
 
     /**
@@ -445,14 +453,14 @@ public class Http2FrameCodec extends Http2ConnectionHandler {
      * are simply logged and replied to by sending a RST_STREAM frame.
      */
     @Override
-    protected final void onStreamError(ChannelHandlerContext ctx, Throwable cause,
+    protected final void onStreamError(ChannelHandlerContext ctx, boolean outbound, Throwable cause,
                                  Http2Exception.StreamException streamException) {
         int streamId = streamException.streamId();
         Http2Stream connectionStream = connection().stream(streamId);
         if (connectionStream == null) {
             onHttp2UnknownStreamError(ctx, cause, streamException);
             // Write a RST_STREAM
-            super.onStreamError(ctx, cause, streamException);
+            super.onStreamError(ctx, outbound, cause, streamException);
             return;
         }
 
@@ -460,11 +468,14 @@ public class Http2FrameCodec extends Http2ConnectionHandler {
         if (stream == null) {
             LOG.warn("Stream exception thrown without stream object attached.", cause);
             // Write a RST_STREAM
-            super.onStreamError(ctx, cause, streamException);
+            super.onStreamError(ctx, outbound, cause, streamException);
             return;
         }
 
-        onHttp2FrameStreamException(ctx, new Http2FrameStreamException(stream, streamException.error(), cause));
+        if (!outbound) {
+            // We only forward non outbound errors as outbound errors will already be reflected by failing the promise.
+            onHttp2FrameStreamException(ctx, new Http2FrameStreamException(stream, streamException.error(), cause));
+        }
     }
 
     void onHttp2UnknownStreamError(@SuppressWarnings("unused") ChannelHandlerContext ctx, Throwable cause,
@@ -493,13 +504,13 @@ public class Http2FrameCodec extends Http2ConnectionHandler {
         }
 
         @Override
-        public void onPingRead(ChannelHandlerContext ctx, ByteBuf data) {
-            onHttp2Frame(ctx, new DefaultHttp2PingFrame(data, false).retain());
+        public void onPingRead(ChannelHandlerContext ctx, long data) {
+            onHttp2Frame(ctx, new DefaultHttp2PingFrame(data, false));
         }
 
         @Override
-        public void onPingAckRead(ChannelHandlerContext ctx, ByteBuf data) {
-            onHttp2Frame(ctx, new DefaultHttp2PingFrame(data, true).retain());
+        public void onPingAckRead(ChannelHandlerContext ctx, long data) {
+            onHttp2Frame(ctx, new DefaultHttp2PingFrame(data, true));
         }
 
         @Override

@@ -16,11 +16,11 @@
 package io.netty.util.internal;
 
 import io.netty.util.concurrent.FastThreadLocalThread;
-import io.netty.util.internal.logging.InternalLogger;
-import io.netty.util.internal.logging.InternalLoggerFactory;
 
 import java.lang.ref.ReferenceQueue;
 import java.lang.ref.WeakReference;
+import java.security.AccessController;
+import java.security.PrivilegedAction;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -34,11 +34,13 @@ import static java.lang.Math.max;
 public final class ObjectCleaner {
     private static final int REFERENCE_QUEUE_POLL_TIMEOUT_MS =
             max(500, getInt("io.netty.util.internal.ObjectCleaner.refQueuePollTimeout", 10000));
+
+    // Package-private for testing
+    static final String CLEANER_THREAD_NAME = ObjectCleaner.class.getSimpleName() + "Thread";
     // This will hold a reference to the AutomaticCleanerReference which will be removed once we called cleanup()
     private static final Set<AutomaticCleanerReference> LIVE_SET = new ConcurrentSet<AutomaticCleanerReference>();
     private static final ReferenceQueue<Object> REFERENCE_QUEUE = new ReferenceQueue<Object>();
     private static final AtomicBoolean CLEANER_RUNNING = new AtomicBoolean(false);
-    private static final String CLEANER_THREAD_NAME = ObjectCleaner.class.getSimpleName() + "Thread";
     private static final Runnable CLEANER_TASK = new Runnable() {
         @Override
         public void run() {
@@ -98,21 +100,31 @@ public final class ObjectCleaner {
 
         // Check if there is already a cleaner running.
         if (CLEANER_RUNNING.compareAndSet(false, true)) {
-            Thread cleanupThread = new FastThreadLocalThread(CLEANER_TASK);
+            final Thread cleanupThread = new FastThreadLocalThread(CLEANER_TASK);
             cleanupThread.setPriority(Thread.MIN_PRIORITY);
             // Set to null to ensure we not create classloader leaks by holding a strong reference to the inherited
             // classloader.
             // See:
             // - https://github.com/netty/netty/issues/7290
             // - https://bugs.openjdk.java.net/browse/JDK-7008595
-            cleanupThread.setContextClassLoader(null);
+            AccessController.doPrivileged(new PrivilegedAction<Void>() {
+                @Override
+                public Void run() {
+                    cleanupThread.setContextClassLoader(null);
+                    return null;
+                }
+            });
             cleanupThread.setName(CLEANER_THREAD_NAME);
 
-            // This Thread is not a daemon as it will die once all references to the registered Objects will go away
-            // and its important to always invoke all cleanup tasks as these may free up direct memory etc.
-            cleanupThread.setDaemon(false);
+            // Mark this as a daemon thread to ensure that we the JVM can exit if this is the only thread that is
+            // running.
+            cleanupThread.setDaemon(true);
             cleanupThread.start();
         }
+    }
+
+    public static int getLiveSetCount() {
+        return LIVE_SET.size();
     }
 
     private ObjectCleaner() {

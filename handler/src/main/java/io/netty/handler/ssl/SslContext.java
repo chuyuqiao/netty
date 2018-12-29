@@ -53,7 +53,6 @@ import java.security.KeyStore;
 import java.security.KeyStoreException;
 import java.security.NoSuchAlgorithmException;
 import java.security.PrivateKey;
-import java.security.Security;
 import java.security.UnrecoverableKeyException;
 import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
@@ -85,6 +84,8 @@ import java.util.List;
  * </pre>
  */
 public abstract class SslContext {
+    static final String ALIAS = "key";
+
     static final CertificateFactory X509_CERT_FACTORY;
     static {
         try {
@@ -1000,7 +1001,7 @@ public abstract class SslContext {
                    CertificateException, IOException {
         KeyStore ks = KeyStore.getInstance(KeyStore.getDefaultType());
         ks.load(null, null);
-        ks.setKeyEntry("key", key, keyPasswordChars, certChain);
+        ks.setKeyEntry(ALIAS, key, keyPasswordChars, certChain);
         return ks;
     }
 
@@ -1081,10 +1082,9 @@ public abstract class SslContext {
         CertificateFactory cf = CertificateFactory.getInstance("X.509");
         X509Certificate[] x509Certs = new X509Certificate[certs.length];
 
-        int i = 0;
         try {
-            for (; i < certs.length; i++) {
-                InputStream is = new ByteBufInputStream(certs[i], true);
+            for (int i = 0; i < certs.length; i++) {
+                InputStream is = new ByteBufInputStream(certs[i], false);
                 try {
                     x509Certs[i] = (X509Certificate) cf.generateCertificate(is);
                 } finally {
@@ -1097,8 +1097,8 @@ public abstract class SslContext {
                 }
             }
         } finally {
-            for (; i < certs.length; i++) {
-                certs[i].release();
+            for (ByteBuf buf: certs) {
+                buf.release();
             }
         }
         return x509Certs;
@@ -1154,8 +1154,15 @@ public abstract class SslContext {
                                                     String keyPassword, KeyManagerFactory kmf)
             throws KeyStoreException, NoSuchAlgorithmException, IOException,
             CertificateException, UnrecoverableKeyException {
-        char[] keyPasswordChars = keyPassword == null ? EmptyArrays.EMPTY_CHARS : keyPassword.toCharArray();
+        char[] keyPasswordChars = keyStorePassword(keyPassword);
         KeyStore ks = buildKeyStore(certChainFile, key, keyPasswordChars);
+        return buildKeyManagerFactory(ks, keyAlgorithm, keyPasswordChars, kmf);
+    }
+
+    static KeyManagerFactory buildKeyManagerFactory(KeyStore ks,
+                                                    String keyAlgorithm,
+                                                    char[] keyPasswordChars, KeyManagerFactory kmf)
+            throws KeyStoreException, NoSuchAlgorithmException, UnrecoverableKeyException {
         // Set up key manager factory to use our key store
         if (kmf == null) {
             kmf = KeyManagerFactory.getInstance(keyAlgorithm);
@@ -1163,5 +1170,9 @@ public abstract class SslContext {
         kmf.init(ks, keyPasswordChars);
 
         return kmf;
+    }
+
+    static char[] keyStorePassword(String keyPassword) {
+        return keyPassword == null ? EmptyArrays.EMPTY_CHARS : keyPassword.toCharArray();
     }
 }

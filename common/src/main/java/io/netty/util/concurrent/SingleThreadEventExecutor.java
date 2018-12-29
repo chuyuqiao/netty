@@ -304,7 +304,7 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
      * Return the number of tasks that are pending for processing.
      *
      * <strong>Be aware that this operation may be expensive as it depends on the internal implementation of the
-     * SingleThreadEventExecutor. So use it was care!</strong>
+     * SingleThreadEventExecutor. So use it with care!</strong>
      */
     public int pendingTasks() {
         return taskQueue.size();
@@ -441,6 +441,19 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
         }
 
         return scheduledTask.delayNanos(currentTimeNanos);
+    }
+
+    /**
+     * Returns the absolute point in time (relative to {@link #nanoTime()}) at which the the next
+     * closest scheduled task should run.
+     */
+    @UnstableApi
+    protected long deadlineNanos() {
+        ScheduledFutureTask<?> scheduledTask = peekScheduledTask();
+        if (scheduledTask == null) {
+            return nanoTime() + SCHEDULE_PURGE_INTERVAL;
+        }
+        return scheduledTask.deadlineNanos();
     }
 
     /**
@@ -762,13 +775,23 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
         }
 
         boolean inEventLoop = inEventLoop();
-        if (inEventLoop) {
-            addTask(task);
-        } else {
+        addTask(task);
+        if (!inEventLoop) {
             startThread();
-            addTask(task);
-            if (isShutdown() && removeTask(task)) {
-                reject();
+            if (isShutdown()) {
+                boolean reject = false;
+                try {
+                    if (removeTask(task)) {
+                        reject = true;
+                    }
+                } catch (UnsupportedOperationException e) {
+                    // The task queue does not support removal so the best thing we can do is to just move on and
+                    // hope we will be able to pick-up the task before its completely terminated.
+                    // In worst case we will log on termination.
+                }
+                if (reject) {
+                    reject();
+                }
             }
         }
 
@@ -898,9 +921,11 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
 
                     // Check if confirmShutdown() was called at the end of the loop.
                     if (success && gracefulShutdownStartTime == 0) {
-                        logger.error("Buggy " + EventExecutor.class.getSimpleName() + " implementation; " +
-                                SingleThreadEventExecutor.class.getSimpleName() + ".confirmShutdown() must be called " +
-                                "before run() implementation terminates.");
+                        if (logger.isErrorEnabled()) {
+                            logger.error("Buggy " + EventExecutor.class.getSimpleName() + " implementation; " +
+                                    SingleThreadEventExecutor.class.getSimpleName() + ".confirmShutdown() must " +
+                                    "be called before run() implementation terminates.");
+                        }
                     }
 
                     try {
@@ -914,14 +939,20 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
                         try {
                             cleanup();
                         } finally {
+                            // Lets remove all FastThreadLocals for the Thread as we are about to terminate and notify
+                            // the future. The user may block on the future and once it unblocks the JVM may terminate
+                            // and start unloading classes.
+                            // See https://github.com/netty/netty/issues/6596.
+                            FastThreadLocal.removeAll();
+
                             STATE_UPDATER.set(SingleThreadEventExecutor.this, ST_TERMINATED);
                             threadLock.release();
                             if (!taskQueue.isEmpty()) {
-                                logger.warn(
-                                        "An event executor terminated with " +
-                                                "non-empty task queue (" + taskQueue.size() + ')');
+                                if (logger.isWarnEnabled()) {
+                                    logger.warn("An event executor terminated with " +
+                                            "non-empty task queue (" + taskQueue.size() + ')');
+                                }
                             }
-
                             terminationFuture.setSuccess(null);
                         }
                     }

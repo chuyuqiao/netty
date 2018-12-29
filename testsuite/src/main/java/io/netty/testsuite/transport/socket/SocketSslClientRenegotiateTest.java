@@ -138,7 +138,8 @@ public class SocketSslClientRenegotiateTest extends AbstractSocketTest {
             public void initChannel(Channel sch) throws Exception {
                 serverChannel = sch;
                 serverSslHandler = serverCtx.newHandler(sch.alloc());
-
+                // As we test renegotiation we should use a protocol that support it.
+                serverSslHandler.engine().setEnabledProtocols(new String[] { "TLSv1.2" });
                 sch.pipeline().addLast("ssl", serverSslHandler);
                 sch.pipeline().addLast("handler", serverHandler);
             }
@@ -150,7 +151,8 @@ public class SocketSslClientRenegotiateTest extends AbstractSocketTest {
             public void initChannel(Channel sch) throws Exception {
                 clientChannel = sch;
                 clientSslHandler = clientCtx.newHandler(sch.alloc());
-
+                // As we test renegotiation we should use a protocol that support it.
+                clientSslHandler.engine().setEnabledProtocols(new String[] { "TLSv1.2" });
                 sch.pipeline().addLast("ssl", clientSslHandler);
                 sch.pipeline().addLast("handler", clientHandler);
             }
@@ -162,7 +164,8 @@ public class SocketSslClientRenegotiateTest extends AbstractSocketTest {
         Future<Channel> clientHandshakeFuture = clientSslHandler.handshakeFuture();
         clientHandshakeFuture.sync();
 
-        String renegotiation = "SSL_RSA_WITH_3DES_EDE_CBC_SHA";
+        String renegotiation = clientSslHandler.engine().getEnabledCipherSuites()[0];
+        // Use the first previous enabled ciphersuite and try to renegotiate.
         clientSslHandler.engine().setEnabledCipherSuites(new String[] { renegotiation });
         clientSslHandler.renegotiate().await();
         serverChannel.close().awaitUninterruptibly();
